@@ -6297,7 +6297,7 @@ AC_PLUGIN([multimeter],          [$plugin_multimeter],      [Read multimeter val
 AC_PLUGIN([mysql],               [$with_libmysql],          [MySQL statistics])
 AC_PLUGIN([netapp],              [$with_libnetapp],         [NetApp plugin])
 AC_PLUGIN([netlink],             [$with_libmnl],            [Enhanced Linux network statistics])
-AC_PLUGIN([netlink_namespace],   [$with_libmnl],            [Enhanced Linux network statistics])
+AC_PLUGIN([netlink_namespace],   [$with_libmnl],            [Enhanced Linux network statistics for namespace])
 AC_PLUGIN([network],             [yes],                     [Network communication plugin])
 AC_PLUGIN([nfs],                 [$plugin_nfs],             [NFS statistics])
 AC_PLUGIN([nginx],               [$with_libcurl],           [nginx statistics])

@@ -54,6 +54,8 @@
 
 #include <libmnl/libmnl.h>
 
+#define SELFNS "/proc/self/ns/net"
+
 struct ir_link_stats_storage_s {
 
   uint64_t rx_packets;
@@ -104,8 +106,6 @@ struct qos_stats {
 static int ir_ignorelist_invert = 1;
 static ir_ignorelist_t *ir_ignorelist_head = NULL;
 
-static struct mnl_socket *nl;
-
 static char **iflist = NULL;
 static size_t iflist_len = 0;
 
@@ -116,7 +116,8 @@ static const char *config_keys[] = {"Interface", "VerboseInterface",
 static int config_keys_num = STATIC_ARRAY_SIZE(config_keys);
 
 /* Will store namespace name here */
-static char **ns_name = NULL;
+static char *ns_name = NULL;
+static struct mnl_socket *nloriginal, *nltarget;
 
 static int add_ignorelist(const char *dev, const char *type, const char *inst) {
   ir_ignorelist_t *entry;
@@ -198,7 +199,7 @@ static void submit_one(const char *dev, const char *type,
 
   vl.values = &(value_t){.derive = value};
   vl.values_len = 1;
-  sstrncpy(vl.plugin, "netlink", sizeof(vl.plugin));
+  sstrncpy(vl.plugin, "netlink_namespace", sizeof(vl.plugin));
   sstrncpy(vl.plugin_instance, dev, sizeof(vl.plugin_instance));
   sstrncpy(vl.type, type, sizeof(vl.type));
 
@@ -656,21 +657,19 @@ static int ir_config(const char *key, const char *value) {
     if ((fields_num < 1) || (fields_num > 2)) {
       ERROR ("netlink_namespace plugin: Invalid number of fields for option "
           "`%s'. Got %i, expected 1 or 2.", key, fields_num);
-      return (-1);
+      status = -1;
     } else {
-      // ToDo: Check that /var/.... file exists (debuging messages please)
       strncat(nspath, fields[0], sizeof(nspath) - strlen(nspath));
       if (access(nspath, F_OK ) != 0 ) {
         ERROR ("netlink_namespace plugin: ir_config: Unable to access file '%s'.", nspath);
         status = -1;
       } else {
         INFO ("netlink_namespace plugin: ir_config: Setting config to %s", nspath);
-        ns_name = (char**) realloc(ns_name, sizeof(char *));
-        *ns_name = (char *) malloc(sizeof(char) * 1024);
-        strncpy(*ns_name, nspath, strlen(nspath));
-
-        INFO ("netlink_namespace pliugin: ir_config: ns_name is now %s", *ns_name);
-        
+        if ((ns_name = strndup(nspath, sizeof(nspath))) < 0) {
+          ERROR ("netlink_namespace plugin: ir_config: Error while copying/malloc namespace path");
+          status = -1;
+        }
+        INFO ("netlink_namespace pliugin: ir_config: ns_name is now %s", ns_name);
         status = 0;
       }
     }
@@ -683,34 +682,59 @@ static int ir_config(const char *key, const char *value) {
 
 static int ir_init (void)
 {
+  int selfns, targetns;
+
   DEBUG("Initializing netlink_namespace plugin\n");
-  if (ns_name != NULL) {
-    DEBUG("netlink_namespace plugin: ir_init: Switching to namespace on file '%s'.", *ns_name);
-
-    int fd = open(*ns_name, O_RDONLY);
-    if (fd  < 0) {
-        ERROR("Unable to open() %s", *ns_name);
-    }
-
-    if (setns(fd, CLONE_NEWNET) != 0) {
-       ERROR("netlink_namespace plugin: ir_init: Unable to setns() to %s.", *ns_name);
-       return (-1);
-    }
-  } else {
+  if (ns_name == NULL) {
     ERROR("netlink_namespace plugin: ir_init: Did not get the namespace name?");
     return (-1);
   }
 
-  nl = mnl_socket_open (NETLINK_ROUTE);
-  if (nl == NULL)  {
-    ERROR ("netlink_namespace plugin: ir_init: mnl_socket_open failed.");
+  /* Save "current" namespace status */
+  if (NULL == (nloriginal = mnl_socket_open(NETLINK_ROUTE))) {
+    ERROR("netlink_namespace plugin: ir_init: Unable to open mnl_socket for current namespace  (errno %d)", EXIT_FAILURE);
     return (-1);
   }
 
-  if (mnl_socket_bind (nl, 0, MNL_SOCKET_AUTOPID) < 0)  {
-    ERROR ("netlink_namespace plugin: ir_init: mnl_socket_bind failed.");
+  if (0 > mnl_socket_bind(nloriginal, 0, MNL_SOCKET_AUTOPID)) {
+    ERROR("netlink_namespace plugin: ir_init: Unable to bind to netlink for current namespace (errno %d)", EXIT_FAILURE);
     return (-1);
   }
+
+  if ((selfns = open(SELFNS, O_RDONLY)) < 0) {
+    ERROR("netlink_namespace plugin: ir_init: Could not open self namespace file at '%s'", SELFNS);
+    return (-1);
+  }
+
+  /* Save custom configured namespace status */
+
+  DEBUG("netlink_namespace plugin: ir_init: Switching to namespace on file '%s'.", ns_name);
+  if ((targetns = open(ns_name, O_RDONLY)) < 0) {
+    ERROR("Unable to open namespace file '%s'", ns_name);
+    return(-1);
+  }
+
+  if (setns(targetns, CLONE_NEWNET) != 0) {
+    ERROR("netlink_namespace plugin: ir_init: Unable to switch namespace to '%s'", ns_name);
+    return(-1);
+  }
+
+  if (NULL == (nltarget = mnl_socket_open(NETLINK_ROUTE))) {
+    ERROR("netlink_namespace plugin: ir_init: Unable to open socket to namespace '%s'", ns_name);
+    return(-1);
+  }
+
+  if (0 < mnl_socket_bind(nltarget, 0, MNL_SOCKET_AUTOPID)) {
+    ERROR("netlink_namespace plugin: ir_init: Unable to bind to target namespace");
+    return(-1);
+  }
+
+  /* Get back to main namespace */
+  if (setns(selfns, CLONE_NEWNET) != 0) {
+    ERROR("netlink_namespace plugin: ir_init: Unable to get back to original namespace");
+    return(-1);
+  }
+ 
   return (0);
 } /* int ir_init */
 
@@ -724,7 +748,7 @@ static int ir_read(void) {
   static const int type_id[] = {RTM_GETQDISC, RTM_GETTCLASS, RTM_GETTFILTER};
   static const char *type_name[] = {"qdisc", "class", "filter"};
 
-  portid = mnl_socket_get_portid(nl);
+  portid = mnl_socket_get_portid(nltarget);
 
   nlh = mnl_nlmsg_put_header(buf);
   nlh->nlmsg_type = RTM_GETLINK;
@@ -733,17 +757,17 @@ static int ir_read(void) {
   rt = mnl_nlmsg_put_extra_header(nlh, sizeof(*rt));
   rt->rtgen_family = AF_PACKET;
 
-  if (mnl_socket_sendto(nl, nlh, nlh->nlmsg_len) < 0) {
+  if (mnl_socket_sendto(nltarget, nlh, nlh->nlmsg_len) < 0) {
     ERROR("netlink_namespace plugin: ir_read: rtnl_wilddump_request failed.");
     return (-1);
   }
 
-  ret = mnl_socket_recvfrom(nl, buf, sizeof(buf));
+  ret = mnl_socket_recvfrom(nltarget, buf, sizeof(buf));
   while (ret > 0) {
     ret = mnl_cb_run(buf, ret, seq, portid, link_filter_cb, NULL);
     if (ret <= MNL_CB_STOP)
       break;
-    ret = mnl_socket_recvfrom(nl, buf, sizeof(buf));
+    ret = mnl_socket_recvfrom(nltarget, buf, sizeof(buf));
   }
   if (ret < 0) {
     ERROR("netlink_namespace plugin: ir_read: mnl_socket_recvfrom failed.");
@@ -778,17 +802,17 @@ static int ir_read(void) {
       tm->tcm_family = AF_PACKET;
       tm->tcm_ifindex = ifindex;
 
-      if (mnl_socket_sendto(nl, nlh, nlh->nlmsg_len) < 0) {
+      if (mnl_socket_sendto(nltarget, nlh, nlh->nlmsg_len) < 0) {
         ERROR("netlink_namespace plugin: ir_read: mnl_socket_sendto failed.");
         continue;
       }
 
-      ret = mnl_socket_recvfrom(nl, buf, sizeof(buf));
+      ret = mnl_socket_recvfrom(nltarget, buf, sizeof(buf));
       while (ret > 0) {
         ret = mnl_cb_run(buf, ret, seq, portid, qos_filter_cb, &ifindex);
         if (ret <= MNL_CB_STOP)
           break;
-        ret = mnl_socket_recvfrom(nl, buf, sizeof(buf));
+        ret = mnl_socket_recvfrom(nltarget, buf, sizeof(buf));
       }
       if (ret < 0) {
         ERROR ("netlink_namespace plugin: ir_read:mnl_socket_recvfrom failed.");
@@ -802,9 +826,13 @@ static int ir_read(void) {
 } /* int ir_read */
 
 static int ir_shutdown(void) {
-  if (nl) {
-    mnl_socket_close(nl);
-    nl = NULL;
+  if (nltarget) {
+    mnl_socket_close(nltarget);
+    nltarget = NULL;
+  }
+  if (nloriginal) {
+    mnl_socket_close(nloriginal);
+    nloriginal = NULL;
   }
   return (0);
 } /* int ir_shutdown */
