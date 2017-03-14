@@ -117,7 +117,7 @@ static int config_keys_num = STATIC_ARRAY_SIZE(config_keys);
 
 /* Will store namespace name here */
 static char *ns_name = NULL;
-static struct mnl_socket *nloriginal, *nltarget;
+static struct mnl_socket *nltarget;
 
 static int add_ignorelist(const char *dev, const char *type, const char *inst) {
   ir_ignorelist_t *entry;
@@ -680,6 +680,15 @@ static int ir_config(const char *key, const char *value) {
   return (status);
 } /* int ir_config */
 
+static void close_fds(int* selfns, int* targetns) {
+  if ((*selfns >= 0) && (close(*selfns) != 0)) {
+    ERROR("Closing \"selfns\" file failed: %m");
+  }
+  if ((*targetns >= 0) && (close(*targetns) != 0)) {
+    ERROR("Closing \"targetns\" file failed: %m");
+  }
+} /* fd_close */
+
 static int ir_init (void)
 {
   int selfns, targetns;
@@ -687,23 +696,14 @@ static int ir_init (void)
   DEBUG("Initializing netlink_namespace plugin\n");
   if (ns_name == NULL) {
     ERROR("netlink_namespace plugin: ir_init: Did not get the namespace name?");
-    return (-1);
+    return -1;
   }
 
-  /* Save "current" namespace status */
-  if (NULL == (nloriginal = mnl_socket_open(NETLINK_ROUTE))) {
-    ERROR("netlink_namespace plugin: ir_init: Unable to open mnl_socket for current namespace  (errno %d)", EXIT_FAILURE);
-    return (-1);
-  }
-
-  if (0 > mnl_socket_bind(nloriginal, 0, MNL_SOCKET_AUTOPID)) {
-    ERROR("netlink_namespace plugin: ir_init: Unable to bind to netlink for current namespace (errno %d)", EXIT_FAILURE);
-    return (-1);
-  }
-
+  /* Save "current" namespace */
   if ((selfns = open(SELFNS, O_RDONLY)) < 0) {
     ERROR("netlink_namespace plugin: ir_init: Could not open self namespace file at '%s'", SELFNS);
-    return (-1);
+    close_fds(&selfns, &targetns);
+    return -1;
   }
 
   /* Save custom configured namespace status */
@@ -711,31 +711,37 @@ static int ir_init (void)
   DEBUG("netlink_namespace plugin: ir_init: Switching to namespace on file '%s'.", ns_name);
   if ((targetns = open(ns_name, O_RDONLY)) < 0) {
     ERROR("Unable to open namespace file '%s'", ns_name);
-    return(-1);
+    close_fds(&selfns, &targetns);
+    return -1;
   }
 
   if (setns(targetns, CLONE_NEWNET) != 0) {
     ERROR("netlink_namespace plugin: ir_init: Unable to switch namespace to '%s'", ns_name);
-    return(-1);
+    close_fds(&selfns, &targetns);
+    return -1;
   }
 
   if (NULL == (nltarget = mnl_socket_open(NETLINK_ROUTE))) {
     ERROR("netlink_namespace plugin: ir_init: Unable to open socket to namespace '%s'", ns_name);
-    return(-1);
+    close_fds(&selfns, &targetns);
+    return -1;
   }
 
   if (0 < mnl_socket_bind(nltarget, 0, MNL_SOCKET_AUTOPID)) {
     ERROR("netlink_namespace plugin: ir_init: Unable to bind to target namespace");
-    return(-1);
+    close_fds(&selfns, &targetns);
+    return -1;
   }
 
   /* Get back to main namespace */
   if (setns(selfns, CLONE_NEWNET) != 0) {
     ERROR("netlink_namespace plugin: ir_init: Unable to get back to original namespace");
-    return(-1);
+    close_fds(&selfns, &targetns);
+    return -1;
   }
  
-  return (0);
+  close_fds(&selfns, &targetns);
+  return 0;
 } /* int ir_init */
 
 static int ir_read(void) {
@@ -759,7 +765,7 @@ static int ir_read(void) {
 
   if (mnl_socket_sendto(nltarget, nlh, nlh->nlmsg_len) < 0) {
     ERROR("netlink_namespace plugin: ir_read: rtnl_wilddump_request failed.");
-    return (-1);
+    return -1;
   }
 
   ret = mnl_socket_recvfrom(nltarget, buf, sizeof(buf));
@@ -771,7 +777,7 @@ static int ir_read(void) {
   }
   if (ret < 0) {
     ERROR("netlink_namespace plugin: ir_read: mnl_socket_recvfrom failed.");
-    return (-1);
+    return -1;
   }
 
   /* `link_filter_cb' will update `iflist' which is used here to iterate
@@ -822,7 +828,7 @@ static int ir_read(void) {
     } /* for (type_index) */
   }   /* for (if_index) */
 
-  return (0);
+  return 0;
 } /* int ir_read */
 
 static int ir_shutdown(void) {
@@ -830,11 +836,7 @@ static int ir_shutdown(void) {
     mnl_socket_close(nltarget);
     nltarget = NULL;
   }
-  if (nloriginal) {
-    mnl_socket_close(nloriginal);
-    nloriginal = NULL;
-  }
-  return (0);
+  return 0;
 } /* int ir_shutdown */
 
 void module_register(void) {
