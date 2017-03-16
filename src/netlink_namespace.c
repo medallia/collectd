@@ -29,10 +29,7 @@
 #define _GNU_SOURCE
 #include <sched.h>
 
-#include "collectd.h"
-
-#include "common.h"
-#include "plugin.h"
+#include <inttypes.h>
 
 #include <asm/types.h>
 
@@ -45,7 +42,6 @@
 #include <linux/pkt_sched.h>
 #endif
 
-
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -53,6 +49,18 @@
 #include <unistd.h>
 
 #include <libmnl/libmnl.h>
+
+#include <string.h>
+#include <stdlib.h>
+#include <stdbool.h>
+
+#include <linux/pkt_sched.h>
+
+#include "collectd.h"
+
+#include "common.h"
+#include "plugin.h"
+
 
 #define SELFNS "/proc/self/ns/net"
 
