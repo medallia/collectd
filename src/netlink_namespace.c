@@ -693,24 +693,30 @@ static int ir_config(const char *key, const char *value) {
   return (status);
 } /* int ir_config */
 
-static void ir_init_error(int* selfns, int* targetns) {
-  if ((*targetns >= 0) && (close(*targetns) != 0)) {
+static void ir_init_error(int selfns, int targetns) {
+  if ((targetns >= 0) && (close(targetns) != 0)) {
     ERROR("Closing \"targetns\" file failed: %m");
   }
-  if (*selfns >= 0) {
-    if (setns(*selfns, CLONE_NEWNET) != 0) {
+  if (selfns >= 0) {
+    if (setns(selfns, CLONE_NEWNET) != 0) {
       ERROR("netlink_namespace plugin: ir_init_error: Getting back to original namespace failed: %m");
+      abort();
     }
-    if  (close(*selfns) != 0) {
+    if  (close(selfns) != 0) {
       ERROR("netlink_namespace plugin: ir_init_error: Closing \"selfns\" file failed: %m");
     }
   }
-  nltarget = NULL;
+
+  if (nltarget != NULL) {
+    mnl_socket_close(nltarget);
+    nltarget = NULL;
+  }
 } /* ir_init_error */
 
 static int ir_init (void)
 {
-  int selfns, targetns = -1;
+  int selfns = -1;
+  int targetns = -1;
 
   DEBUG("Initializing netlink_namespace plugin\n");
   if (ns_name == NULL) {
@@ -721,7 +727,7 @@ static int ir_init (void)
   /* Save "current" namespace */
   if ((selfns = open(SELFNS, O_RDONLY)) < 0) {
     ERROR("netlink_namespace plugin: ir_init: Could not open self namespace file at '%s'", SELFNS);
-    ir_init_error(&selfns, &targetns);
+    ir_init_error(selfns, targetns);
     return -1;
   }
 
@@ -730,33 +736,37 @@ static int ir_init (void)
   DEBUG("netlink_namespace plugin: ir_init: Switching to namespace on file '%s'.", ns_name);
   if ((targetns = open(ns_name, O_RDONLY)) < 0) {
     ERROR("Unable to open namespace file '%s'", ns_name);
-    ir_init_error(&selfns, &targetns);
+    ir_init_error(selfns, targetns);
     return -1;
   }
 
   if (setns(targetns, CLONE_NEWNET) != 0) {
     ERROR("netlink_namespace plugin: ir_init: Unable to switch namespace to '%s'", ns_name);
-    ir_init_error(&selfns, &targetns);
-    abort();
+    ir_init_error(selfns, targetns);
+    return -1;
   }
 
   if (NULL == (nltarget = mnl_socket_open(NETLINK_ROUTE))) {
     ERROR("netlink_namespace plugin: ir_init: Unable to open socket to namespace '%s'", ns_name);
-    ir_init_error(&selfns, &targetns);
+    ir_init_error(selfns, targetns);
     return -1;
   }
 
   if (0 < mnl_socket_bind(nltarget, 0, MNL_SOCKET_AUTOPID)) {
     ERROR("netlink_namespace plugin: ir_init: Unable to bind to target namespace");
-    ir_init_error(&selfns, &targetns);
+    ir_init_error(selfns, targetns);
     return -1;
   }
 
   /* Get back to main namespace */
   if (setns(selfns, CLONE_NEWNET) != 0) {
     ERROR("netlink_namespace plugin: ir_init: Unable to get back to original namespace");
-    ir_init_error(&selfns, &targetns);
-    return -1;
+    ir_init_error(selfns, targetns);
+    abort();
+  }
+
+  if ((close(selfns) != 0) || (close(targetns) != 0)) {
+    INFO("netlink_namespace plugin: ir_init: Unable to close file descritpros for selfns or targetns ");
   }
  
   return 0;
